@@ -1,591 +1,408 @@
 #!/usr/bin/env python3
 """The world on Saturday 21 November 2026, in one picture.
 
-Standard library only. Reads art.png (next to this file), decodes it with
-zlib + scanline unfiltering, cuts the five motifs out, scales each one into a
-big circular "globe", and letters every headline with a stroke font drawn in
-code. Writes /output/entry.png (fallback ./output/entry.png), deterministic.
+Standard library only. The poster itself (lettering included) was generated
+ahead of time and committed as poster.png next to this file; this program is
+a faithful carrier. It decodes poster.png with zlib + scanline unfiltering,
+composites any transparency onto white, box-averages it down to fit
+1024 x 1024 if needed, and re-encodes it as an 8-bit RGB PNG with fixed
+settings at /output/entry.png (fallback ./output/entry.png), guaranteed to
+be at most 1 MiB. Same input, same bytes out: no randomness, no timestamps.
 """
-import math
 import os
 import struct
+import sys
 import zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-W = H = 1024
-WHITE = (255, 255, 255)
-BLACK = (14, 14, 14)
-RED = (227, 18, 11)  # #E3120B
+SOURCE = os.path.join(HERE, "poster.png")
+MAX_SIDE = 1024
+MAX_BYTES = 1048576
+ZLIB_LEVEL = 9
+PNG_SIG = b"\x89PNG\r\n\x1a\n"
 
-# Globe circle.
-CX, CY, CR = 512.0, 630.0, 376.0
+# Colour type -> samples per pixel.
+CHANNELS = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}
 
 
 # --------------------------------------------------------------------------
-# PNG decoding (stdlib only)
+# PNG decoding
 # --------------------------------------------------------------------------
 
-def _add_bytes(x, y, n):
-    """Byte-wise (x + y) mod 256 on two equal-length rows, via big ints."""
-    m7 = int.from_bytes(b"\x7f" * n, "big")
-    m8 = int.from_bytes(b"\x80" * n, "big")
-    a = int.from_bytes(x, "big")
-    b = int.from_bytes(y, "big")
-    s = ((a & m7) + (b & m7)) ^ ((a ^ b) & m8)
-    return bytearray(s.to_bytes(n, "big"))
-
-
-def read_png(path):
-    with open(path, "rb") as fh:
-        data = fh.read()
-    if data[:8] != b"\x89PNG\r\n\x1a\n":
-        raise ValueError("not a PNG")
+def read_chunks(data):
+    """Yield (type, body) for every chunk, checking length and CRC."""
+    if data[:8] != PNG_SIG:
+        raise ValueError("not a PNG file")
     pos = 8
-    idat = []
-    w = h = depth = ctype = interlace = None
-    while pos < len(data):
-        (n,) = struct.unpack(">I", data[pos:pos + 4])
-        typ = data[pos + 4:pos + 8]
-        body = data[pos + 8:pos + 8 + n]
-        pos += 12 + n
-        if typ == b"IHDR":
-            w, h, depth, ctype, _, _, interlace = struct.unpack(">IIBBBBB", body)
-        elif typ == b"IDAT":
-            idat.append(body)
-        elif typ == b"IEND":
-            break
-    if depth != 8 or interlace != 0 or ctype not in (0, 2, 4, 6):
-        raise ValueError("unsupported PNG format")
-    bpp = {0: 1, 2: 3, 4: 2, 6: 4}[ctype]
-    raw = zlib.decompress(b"".join(idat))
-    stride = w * bpp
-    prev = bytearray(stride)
+    while pos + 12 <= len(data):
+        length, = struct.unpack(">I", data[pos:pos + 4])
+        ctype = data[pos + 4:pos + 8]
+        body = data[pos + 8:pos + 8 + length]
+        crc, = struct.unpack(">I", data[pos + 8 + length:pos + 12 + length])
+        if len(body) != length or zlib.crc32(ctype + body) != crc:
+            raise ValueError("corrupt chunk %r" % ctype)
+        yield ctype, body
+        pos += 12 + length
+        if ctype == b"IEND":
+            return
+    raise ValueError("PNG ends without IEND")
+
+
+def unfilter(raw, width, height, bpp, stride):
+    """Undo the per-scanline filters; return a list of row bytearrays."""
     rows = []
-    p = 0
-    for _ in range(h):
-        f = raw[p]
-        line = bytearray(raw[p + 1:p + 1 + stride])
-        p += 1 + stride
-        if f == 1:
+    prev = bytearray(stride)
+    pos = 0
+    for _ in range(height):
+        ftype = raw[pos]
+        line = bytearray(raw[pos + 1:pos + 1 + stride])
+        pos += 1 + stride
+        if len(line) != stride:
+            raise ValueError("image data too short")
+        if ftype == 1:
             for i in range(bpp, stride):
                 line[i] = (line[i] + line[i - bpp]) & 255
-        elif f == 2:
-            line = _add_bytes(line, prev, stride)
-        elif f == 3:
-            for i in range(bpp):
-                line[i] = (line[i] + (prev[i] >> 1)) & 255
-            for i in range(bpp, stride):
-                line[i] = (line[i] + ((line[i - bpp] + prev[i]) >> 1)) & 255
-        elif f == 4:
-            for i in range(bpp):
-                line[i] = (line[i] + prev[i]) & 255
-            for i in range(bpp, stride):
-                a = line[i - bpp]
-                b = prev[i]
-                c = prev[i - bpp]
-                pa = b - c
-                pb = a - c
-                pc = pa + pb
-                if pa < 0:
-                    pa = -pa
-                if pb < 0:
-                    pb = -pb
-                if pc < 0:
-                    pc = -pc
-                if pa <= pb and pa <= pc:
-                    line[i] = (line[i] + a) & 255
-                elif pb <= pc:
-                    line[i] = (line[i] + b) & 255
+        elif ftype == 2:
+            line = bytearray((a + b) & 255 for a, b in zip(line, prev))
+        elif ftype == 3:
+            for i in range(stride):
+                left = line[i - bpp] if i >= bpp else 0
+                line[i] = (line[i] + ((left + prev[i]) >> 1)) & 255
+        elif ftype == 4:
+            for i in range(stride):
+                if i >= bpp:
+                    a = line[i - bpp]
+                    c = prev[i - bpp]
                 else:
-                    line[i] = (line[i] + c) & 255
+                    a = c = 0
+                b = prev[i]
+                p = a + b - c
+                pa = abs(p - a)
+                pb = abs(p - b)
+                pc = abs(p - c)
+                if pa <= pb and pa <= pc:
+                    pred = a
+                elif pb <= pc:
+                    pred = b
+                else:
+                    pred = c
+                line[i] = (line[i] + pred) & 255
+        elif ftype != 0:
+            raise ValueError("bad filter type %d" % ftype)
         rows.append(line)
         prev = line
-    # Normalise to RGB rows (alpha composited over white).
-    out = []
+    return rows
+
+
+def unpack_low_depth(line, width, depth):
+    """Expand 1/2/4-bit samples of one row to one byte per sample."""
+    per_byte = 8 // depth
+    mask = (1 << depth) - 1
+    out = bytearray()
+    for byte in line:
+        for k in range(per_byte):
+            out.append((byte >> (8 - depth * (k + 1))) & mask)
+    return out[:width]
+
+
+def decode_png(data):
+    """Return (width, height, rgb) with rgb a bytes object, 3 bytes/pixel."""
+    ihdr = None
+    palette = None
+    trns = None
+    idat = []
+    for ctype, body in read_chunks(data):
+        if ctype == b"IHDR":
+            ihdr = struct.unpack(">IIBBBBB", body)
+        elif ctype == b"PLTE":
+            palette = body
+        elif ctype == b"tRNS":
+            trns = body
+        elif ctype == b"IDAT":
+            idat.append(body)
+    if ihdr is None or not idat:
+        raise ValueError("PNG lacks IHDR or IDAT")
+    width, height, depth, ctype, comp, filt, interlace = ihdr
+    if ctype not in CHANNELS or comp != 0 or filt != 0:
+        raise ValueError("unsupported PNG header %r" % (ihdr,))
+    if interlace != 0:
+        raise ValueError("interlaced PNGs are not supported")
+    if depth not in (1, 2, 4, 8, 16) or (depth < 8 and ctype not in (0, 3)):
+        raise ValueError("unsupported bit depth %d" % depth)
+    if ctype == 3 and palette is None:
+        raise ValueError("palette image without PLTE")
+
+    nch = CHANNELS[ctype]
+    bits_per_pixel = nch * depth
+    bpp = max(1, bits_per_pixel // 8)
+    stride = (width * bits_per_pixel + 7) // 8
+    rows = unfilter(zlib.decompress(b"".join(idat)), width, height, bpp, stride)
+
+    # Alpha compositing onto white, as a lookup: COMP[a][c].
+    comp = [bytes((c * a + 255 * (255 - a) + 127) // 255 for c in range(256))
+            for a in range(256)]
+
+    if ctype == 3:
+        # Palette entries, already composited onto white.
+        alphas = trns or b""
+        lut = []
+        for i in range(256):
+            if 3 * i + 3 <= len(palette):
+                r, g, b = palette[3 * i:3 * i + 3]
+            else:
+                r = g = b = 0
+            a = alphas[i] if i < len(alphas) else 255
+            lut.append(bytes((comp[a][r], comp[a][g], comp[a][b])))
+    key = None
+    if trns and ctype in (0, 2):
+        # tRNS colour key: matching pixels are fully transparent -> white.
+        key = trns[:2] if ctype == 0 else trns[:6]
+
+    out = bytearray()
     for line in rows:
-        if ctype == 2:
-            out.append(bytes(line))
+        if depth < 8:
+            samples = unpack_low_depth(line, width, depth)
+            if ctype == 3:
+                out += b"".join(lut[s] for s in samples)
+            else:
+                scale = 255 // ((1 << depth) - 1)
+                keyval = int.from_bytes(key, "big") if key else -1
+                for s in samples:
+                    v = 255 if s == keyval else s * scale
+                    out += bytes((v, v, v))
             continue
-        rgb = bytearray(w * 3)
-        for x in range(w):
-            if ctype == 6:
-                r, g, b, a = line[4 * x:4 * x + 4]
-            elif ctype == 4:
-                r = g = b = line[2 * x]
-                a = line[2 * x + 1]
+        if depth == 16:
+            keyed = line
+            line = line[0::2]  # high byte of every sample
+        else:
+            keyed = None
+        if ctype == 2:
+            if key is None:
+                out += line
             else:
-                r = g = b = line[x]
-                a = 255
-            k = 255 - a
-            rgb[3 * x] = (r * a + 255 * k) // 255
-            rgb[3 * x + 1] = (g * a + 255 * k) // 255
-            rgb[3 * x + 2] = (b * a + 255 * k) // 255
-        out.append(bytes(rgb))
-    return w, h, out
+                size = 6 if depth == 16 else 3
+                src = keyed if depth == 16 else line
+                want = key if depth == 16 else bytes(key[1::2])
+                for x in range(width):
+                    if src[x * size:(x + 1) * size] == want:
+                        out += b"\xff\xff\xff"
+                    else:
+                        out += line[3 * x:3 * x + 3]
+        elif ctype == 0:
+            if key is None:
+                for v in line:
+                    out += bytes((v, v, v))
+            else:
+                size = 2 if depth == 16 else 1
+                src = keyed if depth == 16 else line
+                want = key if depth == 16 else key[1:2]
+                for x in range(width):
+                    v = 255 if src[x * size:(x + 1) * size] == want else line[x]
+                    out += bytes((v, v, v))
+        elif ctype == 3:
+            out += b"".join(lut[s] for s in line)
+        elif ctype == 4:
+            for x in range(width):
+                v = comp[line[2 * x + 1]][line[2 * x]]
+                out += bytes((v, v, v))
+        else:  # ctype == 6
+            for x in range(width):
+                i = 4 * x
+                t = comp[line[i + 3]]
+                out += bytes((t[line[i]], t[line[i + 1]], t[line[i + 2]]))
+    return width, height, bytes(out)
 
 
-def _weights(n_src, n_out):
-    ratio = n_src / n_out
-    res = []
-    for o in range(n_out):
-        a = o * ratio
-        b = a + ratio
-        i = int(a)
-        ws = []
-        while i < b and i < n_src:
-            ov = min(b, i + 1) - max(a, i)
-            if ov > 1e-9:
-                ws.append((i, ov / ratio))
-            i += 1
-        res.append(ws)
-    return res
+# --------------------------------------------------------------------------
+# Deterministic resampling and quantisation
+# --------------------------------------------------------------------------
 
+def box_taps(n, m):
+    """Area weights for shrinking n samples to m (m <= n), all integers.
 
-def resample(rows, box, scale):
-    """Area-average the crop box (x0, y0, x1, y1) by `scale`.
-
-    Returns (w, h, pixels) where pixels is a list of rows of (r, g, b) floats.
+    Output i covers source span [i*n, (i+1)*n) in units of 1/m; source j
+    covers [j*m, (j+1)*m). Each output's weights sum to n exactly.
     """
-    x0, y0, x1, y1 = box
-    sw, sh = x1 - x0, y1 - y0
-    ow = max(1, int(round(sw * scale)))
-    oh = max(1, int(round(sh * scale)))
-    wx = _weights(sw, ow)
-    wy = _weights(sh, oh)
-    hrows = []
-    for y in range(y0, y1):
-        row = rows[y]
-        rr = row[3 * x0:3 * x1:3]
-        gg = row[3 * x0 + 1:3 * x1:3]
-        bb = row[3 * x0 + 2:3 * x1:3]
-        hr = []
-        hg = []
-        hb = []
-        for ws in wx:
-            sr = sg = sb = 0.0
-            for i, wgt in ws:
-                sr += rr[i] * wgt
-                sg += gg[i] * wgt
-                sb += bb[i] * wgt
-            hr.append(sr)
-            hg.append(sg)
-            hb.append(sb)
-        hrows.append((hr, hg, hb))
-    out = []
-    for ws in wy:
-        acc_r = [0.0] * ow
-        acc_g = [0.0] * ow
-        acc_b = [0.0] * ow
-        for j, wgt in ws:
-            hr, hg, hb = hrows[j]
-            for x in range(ow):
-                acc_r[x] += hr[x] * wgt
-                acc_g[x] += hg[x] * wgt
-                acc_b[x] += hb[x] * wgt
-        out.append(list(zip(acc_r, acc_g, acc_b)))
-    return ow, oh, out
+    taps = []
+    for i in range(m):
+        lo, hi = i * n, (i + 1) * n
+        row = []
+        for j in range(lo // m, (hi - 1) // m + 1):
+            w = min(hi, (j + 1) * m) - max(lo, j * m)
+            if w > 0:
+                row.append((j, w))
+        taps.append(row)
+    return taps
 
 
-def duotone(r, g, b):
-    """Re-ink an RGB pixel as white paper + black ink + #E3120B ink."""
-    q = (r - g) / (RED[0] - RED[1])
-    if q < 0.0:
-        q = 0.0
-    elif q > 1.0:
-        q = 1.0
-    paper = (g - RED[1] * q) / 255.0
-    if paper < 0.0:
-        paper = 0.0
-    if paper > 1.0 - q:
-        paper = 1.0 - q
-    k = 1.0 - q - paper
-    return (255 * paper + RED[0] * q + BLACK[0] * k,
-            255 * paper + RED[1] * q + BLACK[1] * k,
-            255 * paper + RED[2] * q + BLACK[2] * k)
+def shrink(width, height, rgb, new_w, new_h):
+    """Integer box-average an RGB image down to new_w x new_h."""
+    if (new_w, new_h) == (width, height):
+        return rgb
+    stride = 3 * width
+    # Vertical pass: weighted sums of whole rows.
+    vt = box_taps(height, new_h)
+    half_h = height // 2
+    rows = []
+    for taps in vt:
+        acc = [0] * stride
+        for j, w in taps:
+            src = rgb[j * stride:(j + 1) * stride]
+            acc = [a + v * w for a, v in zip(acc, src)]
+        rows.append(bytes((a + half_h) // height for a in acc))
+    # Horizontal pass, vectorised per tap slot (missing taps weigh 0).
+    ht = box_taps(width, new_w)
+    slots = max(len(t) for t in ht)
+    idx = [[t[k][0] if k < len(t) else 0 for t in ht] for k in range(slots)]
+    wts = [[t[k][1] if k < len(t) else 0 for t in ht] for k in range(slots)]
+    half_w = width // 2
+    out = bytearray(3 * new_w * new_h)
+    for y, row in enumerate(rows):
+        base = 3 * new_w * y
+        for ch in range(3):
+            plane = row[ch::3]
+            acc = [0] * new_w
+            for k in range(slots):
+                acc = [a + plane[j] * w for a, j, w in zip(acc, idx[k], wts[k])]
+            out[base + ch:base + 3 * new_w:3] = bytes(
+                (a + half_w) // width for a in acc)
+    return bytes(out)
 
 
-# --------------------------------------------------------------------------
-# Canvas
-# --------------------------------------------------------------------------
-
-class Canvas:
-    def __init__(self, w, h):
-        self.w = w
-        self.h = h
-        self.px = bytearray(b"\xff" * (w * h * 3))
-
-    def blend(self, cov, color):
-        px = self.px
-        cr, cg, cb = color
-        for idx, a in cov.items():
-            o = idx * 3
-            if a >= 1.0:
-                px[o] = cr
-                px[o + 1] = cg
-                px[o + 2] = cb
-            else:
-                ia = 1.0 - a
-                px[o] = int(px[o] * ia + cr * a + 0.5)
-                px[o + 1] = int(px[o + 1] * ia + cg * a + 0.5)
-                px[o + 2] = int(px[o + 2] * ia + cb * a + 0.5)
-
-    def rect(self, x0, y0, x1, y1, color):
-        cov = {}
-        for y in range(y0, y1):
-            for x in range(x0, x1):
-                cov[y * self.w + x] = 1.0
-        self.blend(cov, color)
-
-    def multiply_image(self, img, ox, oy, clip):
-        """Multiply-composite a float RGB image at (ox, oy), clipped by clip()."""
-        iw, ih, pix = img
-        px = self.px
-        for j in range(ih):
-            y = oy + j
-            if y < 0 or y >= self.h:
-                continue
-            row = pix[j]
-            for i in range(iw):
-                x = ox + i
-                if x < 0 or x >= self.w:
-                    continue
-                r, g, b = row[i]
-                if r > 253.5 and g > 253.5 and b > 253.5:
-                    continue
-                a = clip(x + 0.5, y + 0.5)
-                if a <= 0.0:
-                    continue
-                r, g, b = duotone(r, g, b)
-                o = (y * self.w + x) * 3
-                px[o] = int(px[o] * (1.0 - a * (1.0 - r / 255.0)) + 0.5)
-                px[o + 1] = int(px[o + 1] * (1.0 - a * (1.0 - g / 255.0)) + 0.5)
-                px[o + 2] = int(px[o + 2] * (1.0 - a * (1.0 - b / 255.0)) + 0.5)
-
-    def to_png(self):
-        rows = []
-        stride = self.w * 3
-        px = self.px
-        prev = bytes(stride)
-        for y in range(self.h):
-            line = px[y * stride:(y + 1) * stride]
-            # Filter "Up" (type 2): cheap, deterministic, compresses well here.
-            diff = bytearray(stride)
-            for i in range(stride):
-                diff[i] = (line[i] - prev[i]) & 255
-            rows.append(b"\x02" + bytes(diff))
-            prev = line
-        raw = b"".join(rows)
-
-        def chunk(typ, body):
-            crc = zlib.crc32(typ + body) & 0xFFFFFFFF
-            return struct.pack(">I", len(body)) + typ + body + struct.pack(">I", crc)
-
-        ihdr = struct.pack(">IIBBBBB", self.w, self.h, 8, 2, 0, 0, 0)
-        return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
-                + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b""))
+def fit_size(width, height, limit):
+    """Largest size within limit x limit with the same aspect ratio."""
+    if width <= limit and height <= limit:
+        return width, height
+    if width >= height:
+        return limit, max(1, (height * limit + width // 2) // width)
+    return max(1, (width * limit + height // 2) // height), limit
 
 
-def circle_alpha(x, y):
-    d = math.hypot(x - CX, y - CY)
-    a = CR - d + 0.5
-    if a >= 1.0:
-        return 1.0
-    return a if a > 0.0 else 0.0
-
-
-def no_clip(x, y):
-    return 1.0
+def quantise(rgb, step):
+    """Snap every channel value to the centre of its step-wide bucket."""
+    if step <= 1:
+        return rgb
+    table = bytes(min(255, (v // step) * step + step // 2) for v in range(256))
+    return rgb.translate(table)
 
 
 # --------------------------------------------------------------------------
-# Stroke font: glyphs on a grid 0..width x 0..10 (y down, 10 = baseline)
+# PNG encoding
 # --------------------------------------------------------------------------
 
-def arc(cx, cy, rx, ry, a0, a1, step=10.0):
-    n = max(3, int(abs(a1 - a0) / step + 0.999))
-    pts = []
-    for k in range(n + 1):
-        t = math.radians(a0 + (a1 - a0) * k / n)
-        pts.append((cx + rx * math.cos(t), cy + ry * math.sin(t)))
-    return pts
+def chunk(ctype, body):
+    return (struct.pack(">I", len(body)) + ctype + body
+            + struct.pack(">I", zlib.crc32(ctype + body)))
 
 
-def stadium(x0, x1, top, bot):
-    r = (x1 - x0) / 2.0
-    c = (x0 + x1) / 2.0
-    return (arc(c, top + r, r, r, 180, 360) + [(x1, bot - r)]
-            + arc(c, bot - r, r, r, 0, 180) + [(x0, top + r)])
+def encode_png(width, height, rgb):
+    """8-bit RGB PNG; every row uses filter 2 (Up); zlib level fixed."""
+    stride = 3 * width
+    raw = bytearray()
+    prev = bytes(stride)
+    for y in range(height):
+        line = rgb[y * stride:(y + 1) * stride]
+        raw.append(2)
+        raw += bytes((a - b) & 255 for a, b in zip(line, prev))
+        prev = line
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return (PNG_SIG + chunk(b"IHDR", ihdr)
+            + chunk(b"IDAT", zlib.compress(bytes(raw), ZLIB_LEVEL))
+            + chunk(b"IEND", b""))
 
 
-def _build_font():
-    g = {}
-    g["A"] = (6, [[(0, 10), (3, 0), (6, 10)], [(1.05, 6.5), (4.95, 6.5)]])
-    g["B"] = (6, [[(0, 5), (3.4, 5)] + arc(3.4, 7.5, 2.6, 2.5, -90, 90)
-                  + [(0, 10), (0, 0), (3.1, 0)] + arc(3.1, 2.5, 2.4, 2.5, -90, 90)])
-    g["C"] = (6, [arc(3, 3, 3, 3, 335, 180) + arc(3, 7, 3, 3, 180, 25)])
-    g["D"] = (6, [[(0, 0), (2.8, 0)] + arc(2.8, 3.2, 3.2, 3.2, 270, 360)
-                  + arc(2.8, 6.8, 3.2, 3.2, 0, 90) + [(0, 10), (0, 0)]])
-    g["E"] = (5.4, [[(5.4, 0), (0, 0), (0, 10), (5.4, 10)], [(0, 4.9), (4.6, 4.9)]])
-    g["F"] = (5.4, [[(5.4, 0), (0, 0), (0, 10)], [(0, 4.9), (4.6, 4.9)]])
-    g["G"] = (6, [arc(3, 3, 3, 3, 335, 180) + arc(3, 7, 3, 3, 180, 0)
-                  + [(6, 5.2), (3.4, 5.2)]])
-    g["H"] = (6, [[(0, 0), (0, 10)], [(6, 0), (6, 10)], [(0, 5), (6, 5)]])
-    g["I"] = (0, [[(0, 0), (0, 10)]])
-    g["J"] = (5.4, [[(5.4, 0), (5.4, 7.3)] + arc(2.7, 7.3, 2.7, 2.7, 0, 165)])
-    g["K"] = (6, [[(0, 0), (0, 10)], [(6, 0), (0, 6.3)], [(2.2, 4.0), (6, 10)]])
-    g["L"] = (5.2, [[(0, 0), (0, 10), (5.2, 10)]])
-    g["M"] = (7.4, [[(0, 10), (0, 0), (3.7, 7.2), (7.4, 0), (7.4, 10)]])
-    g["N"] = (6, [[(0, 10), (0, 0), (6, 10), (6, 0)]])
-    g["O"] = (6, [stadium(0, 6, 0, 10)])
-    g["P"] = (6, [[(0, 10), (0, 0), (3.2, 0)] + arc(3.2, 2.8, 2.8, 2.8, -90, 90)
-                  + [(0, 5.6)]])
-    g["Q"] = (6, [stadium(0, 6, 0, 10), [(3.6, 7.2), (6.2, 10.4)]])
-    g["R"] = (6, [[(0, 10), (0, 0), (3.2, 0)] + arc(3.2, 2.8, 2.8, 2.8, -90, 90)
-                  + [(0, 5.6)], [(2.9, 5.6), (6, 10)]])
-    g["S"] = (6, [arc(3, 2.5, 3, 2.5, 330, 90) + arc(3, 7.5, 3, 2.5, 270, 510)])
-    g["T"] = (6, [[(0, 0), (6, 0)], [(3, 0), (3, 10)]])
-    g["U"] = (6, [[(0, 0)] + arc(3, 7, 3, 3, 180, 0) + [(6, 0)]])
-    g["V"] = (6.2, [[(0, 0), (3.1, 10), (6.2, 0)]])
-    g["W"] = (8, [[(0, 0), (1.9, 10), (4, 2.6), (6.1, 10), (8, 0)]])
-    g["X"] = (6, [[(0, 0), (6, 10)], [(6, 0), (0, 10)]])
-    g["Y"] = (6.2, [[(0, 0), (3.1, 5.2), (6.2, 0)], [(3.1, 5.2), (3.1, 10)]])
-    g["Z"] = (5.6, [[(0, 0), (5.6, 0), (0, 10), (5.6, 10)]])
-    g["0"] = (6, [stadium(0, 6, 0, 10)])
-    g["1"] = (3.6, [[(0, 2.2), (3.0, 0), (3.0, 10)]])
-    g["2"] = (6, [arc(3, 3, 3, 3, 190, 380) + [(0, 10), (6, 10)]])
-    g["3"] = (6, [arc(3, 2.5, 2.8, 2.5, 200, 450) + arc(3, 7.5, 3, 2.5, 270, 520)])
-    g["4"] = (6, [[(4.6, 10), (4.6, 0), (0, 7), (6, 7)]])
-    g["5"] = (6, [[(5.6, 0), (0.5, 0), (0.2, 4.6)] + arc(2.9, 6.9, 3.1, 3.1, 235, 515)])
-    g["6"] = (6, [arc(3, 3, 3, 3, 330, 180) + [(0, 7)] + arc(3, 7, 3, 3, 180, 540)])
-    g["7"] = (6, [[(0, 0), (6, 0), (2.2, 10)]])
-    g["8"] = (6, [arc(3, 2.55, 2.65, 2.55, 90, 450), arc(3, 7.4, 3, 2.6, -90, 270)])
-    g["9"] = (6, [arc(3, 3, 3, 3, 0, 360) + [(6, 7)] + arc(3, 7, 3, 3, 0, 150)])
-    g["-"] = (3.4, [[(0, 5.6), (3.4, 5.6)]])
-    g["·"] = (0, [[(0, 5.2), (0, 5.2)]])
-    g["."] = (0, [[(0, 10), (0, 10)]])
-    g[","] = (0.8, [[(0.8, 9.6), (0, 11.8)]])
-    g["%"] = (7, [[(0.4, 10), (6.6, 0)], arc(1.5, 2.0, 1.5, 2.0, 0, 360),
-                  arc(5.5, 8.0, 1.5, 2.0, 0, 360)])
-    g["&"] = (6.6, [[(6.6, 10), (1.5, 3.9)] + arc(2.9, 2.3, 1.9, 2.3, 140, 400)
-                    + arc(2.9, 7.6, 2.5, 2.4, 200, -15) + [(6.4, 5.6)]])
-    g[" "] = (4.2, [])
-    return g
+def encode_palette(width, height, rgb):
+    """8-bit palette PNG if the image has <= 256 colours, else None.
+
+    The palette is sorted by colour value, so it never depends on pixel order
+    or hashing. Rows use filter 0: indices compress best unfiltered.
+    """
+    colours = set()
+    for i in range(0, len(rgb), 3):
+        colours.add(rgb[i:i + 3])
+        if len(colours) > 256:
+            return None
+    palette = sorted(colours)
+    index = {c: i for i, c in enumerate(palette)}
+    raw = bytearray()
+    for y in range(height):
+        raw.append(0)
+        base = 3 * width * y
+        raw += bytes(index[rgb[i:i + 3]]
+                     for i in range(base, base + 3 * width, 3))
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 3, 0, 0, 0)
+    return (PNG_SIG + chunk(b"IHDR", ihdr)
+            + chunk(b"PLTE", b"".join(palette))
+            + chunk(b"IDAT", zlib.compress(bytes(raw), ZLIB_LEVEL))
+            + chunk(b"IEND", b""))
 
 
-FONT = _build_font()
+def candidates(width, height, rgb):
+    """Encodings to try, best quality first: full RGB, then coarser colours.
+
+    Once quantisation leaves at most 256 colours the palette form is tried
+    too; it is usually far smaller, so resolution survives longer.
+    """
+    for step in (1, 2, 4, 8, 16, 32, 64):
+        pixels = quantise(rgb, step)
+        yield pixels, encode_png(width, height, pixels)
+        if step >= 8:
+            png = encode_palette(width, height, pixels)
+            if png is not None:
+                yield pixels, png
 
 
-class Style:
-    def __init__(self, cap, stroke, cond=1.0, track=None):
-        self.cap = float(cap)
-        self.stroke = float(stroke)
-        self.cond = cond
-        self.unit = (self.cap - self.stroke) / 10.0
-        self.track = self.stroke * 0.55 if track is None else track
+def encode_within_limit(width, height, rgb):
+    """Encode, then coarsen colours and finally shrink until <= MAX_BYTES.
 
-    def advance(self, ch):
-        uw = FONT[ch][0]
-        if ch == " ":
-            return uw * self.unit * self.cond
-        return uw * self.unit * self.cond + self.stroke + self.track
-
-    def width(self, text):
-        if not text:
-            return 0.0
-        return sum(self.advance(c) for c in text) - self.track
-
-
-def text_segments(text, style, x, y):
-    """Line segments (px) for `text` with its cap-top-left at (x, y)."""
-    segs = []
-    half = style.stroke / 2.0
-    u = style.unit
-    sx = u * style.cond
-    pen = x
-    for ch in text:
-        uw, polys = FONT[ch]
-        for poly in polys:
-            pts = [(pen + half + px * sx, y + half + py * u) for px, py in poly]
-            if len(pts) == 1:
-                pts = pts * 2
-            for k in range(len(pts) - 1):
-                segs.append(pts[k] + pts[k + 1])
-        pen += style.advance(ch)
-    return segs
-
-
-def rasterize(segs, radius, cov, w=W, h=H):
-    for x1, y1, x2, y2 in segs:
-        minx = max(0, int(math.floor(min(x1, x2) - radius - 1)))
-        maxx = min(w - 1, int(math.ceil(max(x1, x2) + radius + 1)))
-        miny = max(0, int(math.floor(min(y1, y2) - radius - 1)))
-        maxy = min(h - 1, int(math.ceil(max(y1, y2) + radius + 1)))
-        dx = x2 - x1
-        dy = y2 - y1
-        l2 = dx * dx + dy * dy
-        lim = radius + 0.5
-        for py in range(miny, maxy + 1):
-            cy = py + 0.5
-            base = py * w
-            for px in range(minx, maxx + 1):
-                cx = px + 0.5
-                if l2 > 0.0:
-                    t = ((cx - x1) * dx + (cy - y1) * dy) / l2
-                    if t < 0.0:
-                        t = 0.0
-                    elif t > 1.0:
-                        t = 1.0
-                    ex = x1 + t * dx - cx
-                    ey = y1 + t * dy - cy
-                else:
-                    ex = x1 - cx
-                    ey = y1 - cy
-                d = math.sqrt(ex * ex + ey * ey)
-                a = lim - d
-                if a <= 0.0:
-                    continue
-                if a > 1.0:
-                    a = 1.0
-                idx = base + px
-                if cov.get(idx, 0.0) < a:
-                    cov[idx] = a
-
-
-def draw_text(cv, text, style, x, y, color, align="center", halo=0.0):
-    """Draw text; x is the centre (align=center) or left edge; y is cap top."""
-    tw = style.width(text)
-    if align == "center":
-        x = x - tw / 2.0
-    elif align == "right":
-        x = x - tw
-    segs = text_segments(text, style, x, y)
-    if halo > 0:
-        hc = {}
-        rasterize(segs, style.stroke / 2.0 + halo, hc)
-        cv.blend(hc, WHITE)
-    cov = {}
-    rasterize(segs, style.stroke / 2.0, cov)
-    cv.blend(cov, color)
-    return tw
-
-
-def fit_cond(text, cap, stroke, target, track=None):
-    """Horizontal condense factor that makes `text` exactly `target` wide."""
-    s = Style(cap, stroke, 1.0, track)
-    units = sum(FONT[c][0] for c in text)
-    fixed = s.width(text) - units * s.unit
-    return (target - fixed) / (units * s.unit)
+    Every accepted encoding is decoded again and compared with the pixels it
+    was made from, so a broken file can never be written.
+    """
+    while True:
+        for pixels, png in candidates(width, height, rgb):
+            if len(png) <= MAX_BYTES:
+                if decode_png(png) != (width, height, pixels):
+                    raise RuntimeError("re-encoded PNG does not round-trip")
+                return width, height, png
+        if width == 1 and height == 1:
+            raise RuntimeError("cannot fit even a 1x1 image")  # unreachable
+        new_w = max(1, width * 3 // 4)
+        new_h = max(1, height * 3 // 4)
+        rgb = shrink(width, height, rgb, new_w, new_h)
+        width, height = new_w, new_h
 
 
 # --------------------------------------------------------------------------
-# Content
+# Output
 # --------------------------------------------------------------------------
 
-# Motif crops in art.png pixels -> scale and top-left placement on the page.
-MOTIFS = [
-    # COP31: globe + thermometer + melting ice (top centre)
-    {"box": (570, 125, 1028, 705), "scale": 0.48, "at": (408, 262)},
-    # Mexico: handcuffs + police badge (upper left)
-    {"box": (105, 388, 570, 812), "scale": 0.46, "at": (160, 400)},
-    # Kryvyi Rih: missile, red burst, skyline (upper right)
-    {"box": (1030, 340, 1505, 900), "scale": 0.42, "at": (644, 370)},
-    # BepiColombo: spacecraft + Mercury (lower left)
-    {"box": (135, 862, 715, 1372), "scale": 0.40, "at": (200, 664)},
-    # Dengue: mosquito, shield, virus (lower right)
-    {"box": (735, 1000, 1450, 1392), "scale": 0.40, "at": (556, 700)},
-]
-
-# (headline lines, sublabel lines, centre x, cap-top y)
-LABELS = [
-    (["COP31 TALKS", "RUN INTO OVERTIME"], ["ANTALYA · NO FOSSIL-FUEL DEAL"], 512, 548),
-    (["MEXICO CAPTURES", "CARTEL BOSS"], ["EL CHAPO ISIDRO · FBI MOST WANTED"], 266, 604),
-    (["RUSSIAN STRIKE", "HITS KRYVYI RIH"], ["2 KILLED · 60 WOUNDED"], 748, 614),
-    (["BEPICOLOMBO", "REACHES MERCURY"], ["8-YEAR VOYAGE · ESA & JAXA"], 406, 874),
-    (["MOSQUITOES CUT", "DENGUE 69%"], ["BRAZIL TRIAL · 5,700 CHILDREN"], 642, 866),
-]
-
-LABEL_STYLE = Style(21, 4.5, 0.70)
-SUB_STYLE = Style(11, 2.1, 0.80)
-
-
-def draw_label(cv, heads, subs, cx, y):
-    for line in heads:
-        draw_text(cv, line, LABEL_STYLE, cx, y, BLACK, halo=2.5)
-        y += LABEL_STYLE.cap + 5.5
-    y += 2
-    for line in subs:
-        draw_text(cv, line, SUB_STYLE, cx, y, RED, halo=2.0)
-        y += SUB_STYLE.cap + 4
-
-
-def compose():
-    cv = Canvas(W, H)
-
-    # Masthead: small solid red block with a white caption.
-    cap_style = Style(13, 2.6, 0.9)
-    caption = "ONE DAY · ONE PICTURE"
-    cw = cap_style.width(caption)
-    bx0 = int(512 - cw / 2 - 16)
-    bx1 = int(512 + cw / 2 + 16)
-    cv.rect(bx0, 14, bx1, 44, RED)
-    draw_text(cv, caption, cap_style, 512, 22.5, WHITE)
-
-    # Headline, two lines, heavy and condensed; the date is the biggest thing.
-    l1 = "THE WORLD ON"
-    l2 = "21 NOVEMBER 2026"
-    s1 = Style(62, 15.5, fit_cond(l1, 62, 15.5, 500, 4.5), 4.5)
-    s2 = Style(84, 19.0, fit_cond(l2, 84, 19.0, 840, 5.5), 5.5)
-    draw_text(cv, l1, s1, 512, 54, BLACK)
-    draw_text(cv, l2, s2, 512, 122, BLACK)
-
-    # Teaser line naming the five stories.
-    teaser = ("MEXICO CARTEL ARREST · KRYVYI RIH STRIKE · COP31 OVERTIME · "
-              "BEPICOLOMBO AT MERCURY · DENGUE CUT 69%")
-    ts = Style(12, 2.2, fit_cond(teaser, 12, 2.2, 880), None)
-    draw_text(cv, teaser, ts, 512, 223, BLACK)
-
-    # Art: decode, cut out each motif, scale, multiply into the globe.
-    _, _, rows = read_png(os.path.join(HERE, "art.png"))
-    for m in MOTIFS:
-        img = resample(rows, m["box"], m["scale"])
-        cv.multiply_image(img, m["at"][0], m["at"][1], circle_alpha)
-    del rows
-
-    for heads, subs, cx, y in LABELS:
-        draw_label(cv, heads, subs, cx, y)
-
-    # Footer inside the bottom of the globe.
-    fs = Style(10.5, 2.1, 0.80)
-    draw_text(cv, "SATURDAY · FIVE STORIES · ONE DAY", fs, 512, 972, BLACK)
-
-    # Globe outline.
-    ring = {}
-    rasterize(arc_segments(CX, CY, CR, 360), 2.0, ring)
-    cv.blend(ring, BLACK)
-    return cv
-
-
-def arc_segments(cx, cy, r, n):
-    pts = [(cx + r * math.cos(2 * math.pi * k / n), cy + r * math.sin(2 * math.pi * k / n))
-           for k in range(n + 1)]
-    return [pts[k] + pts[k + 1] for k in range(n)]
+def write_output(png):
+    for folder in ("/output", os.path.join(os.getcwd(), "output")):
+        try:
+            os.makedirs(folder, exist_ok=True)
+            path = os.path.join(folder, "entry.png")
+            tmp = path + ".tmp"
+            with open(tmp, "wb") as f:
+                f.write(png)
+            os.chmod(tmp, 0o644)
+            os.replace(tmp, path)
+            return path
+        except OSError:
+            continue
+    raise OSError("could not write entry.png to /output or ./output")
 
 
 def main():
-    png = compose().to_png()
-    for d in ("/output", os.path.join(HERE, "output")):
-        try:
-            os.makedirs(d, exist_ok=True)
-            path = os.path.join(d, "entry.png")
-            with open(path, "wb") as fh:
-                fh.write(png)
-            os.chmod(path, 0o644)
-            print("wrote", path, len(png), "bytes")
-            return
-        except OSError:
-            continue
-    raise SystemExit("could not write entry.png")
+    with open(SOURCE, "rb") as f:
+        data = f.read()
+    width, height, rgb = decode_png(data)
+    new_w, new_h = fit_size(width, height, MAX_SIDE)
+    rgb = shrink(width, height, rgb, new_w, new_h)
+    width, height, png = encode_within_limit(new_w, new_h, rgb)
+    path = write_output(png)
+    print("wrote %s: %dx%d, %d bytes" % (path, width, height, len(png)))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

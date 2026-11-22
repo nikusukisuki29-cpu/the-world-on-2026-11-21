@@ -7,9 +7,13 @@
 One image summing up Saturday 21 November 2026's world news: Mexico captures
 cartel boss El Chapo Isidro, a Russian strike hits Kryvyi Rih, COP31 climate
 talks run into overtime, BepiColombo reaches Mercury, and Wolbachia mosquitoes
-cut dengue 69% in Brazil. The illustration is generated art (black and red
-duotone, no text); all headlines, the date and the labels are drawn by the
-program itself, so the picture reads cleanly at any size.
+cut dengue 69% in Brazil. The whole poster — masthead, date and headlines
+included — is a single generated image (`poster.png`), designed so the
+central circle holds pictures only and every label sits outside it, tied to
+its motif by a leader line. `main.py` decodes `poster.png` with the Python
+standard library only and re-writes it to `/output/entry.png` within the
+contest limits (at most 1024x1024, at most 1 MiB), deterministically: two
+runs produce byte-identical output.
 
 ## Run it
 

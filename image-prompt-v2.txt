@@ -1,0 +1,69 @@
+A square (1:1) editorial news poster, 1024 x 1024, in the style of The Economist's "The World Ahead" magazine covers: flat vector silhouette illustration, clean hard-edged flat shapes, no gradients, no shading, no texture, no photo realism. Pure white background. Only two inks besides white: near-black (#111111) and Economist red (#E3120B). No other colours, no grey tones, no orange, no pink.
+
+OVERALL LAYOUT, TOP TO BOTTOM, everything centred on the vertical axis:
+1. Top kicker: a small solid red (#E3120B) rectangle centred near the top edge, containing the white text "ONE DAY · ONE PICTURE" in small bold uppercase sans-serif.
+2. Directly below it, centred, in large black bold condensed uppercase sans-serif: "THE WORLD ON".
+3. Directly below that, centred, the largest text on the whole poster, in extra-heavy black condensed uppercase sans-serif, spanning almost the full width: "21 NOVEMBER 2026". The month is spelled N-O-V-E-M-B-E-R. This date must be huge, crisp and unmissable.
+4. A thin black horizontal rule under the date.
+5. The middle of the poster: ONE large circle, centred horizontally, about 46% of the poster width in diameter, with a thin black outline and a white interior. Around the circle, on the white paper OUTSIDE it, sit five short headline blocks (described below). Nothing else.
+6. A thin black horizontal rule near the bottom.
+7. Bottom footer, centred, small black letter-spaced uppercase sans-serif: "SATURDAY · FIVE STORIES · ONE DAY".
+
+THE CIRCLE — PICTURES ONLY, ABSOLUTELY NO TEXT:
+The circle contains only five flat silhouette pictures, black shapes with red accents, each large and bold, filling the circle together like one interlocking globe-like illustration. Arrange them like the five points of a pentagon with one point at the bottom:
+- Upper left inside the circle: a pair of black steel handcuffs with a red police badge shaped like a plain star shield. The badge is blank, with no writing on it.
+- Upper right inside the circle: a black missile diving downward onto a black city skyline silhouette, with a jagged red explosion burst where it hits.
+- Right side, lower, inside the circle: a large black mosquito in side profile, with a red shield in front of it and a small red virus particle crossed out by a bold bar (a blocked-virus mark, a pictogram only, no letters).
+- Bottom centre inside the circle, rising toward the middle: a black globe of the Earth with a red thermometer standing beside it and a white polar ice cap on top that is melting, with a few white or black water drips (never red drips, so nothing looks like blood). The thermometer has no numbers and no tick labels; the globe has no place names.
+- Left side, lower, inside the circle: a cratered planet Mercury as a black disc with white crater rings, and beside it a small spacecraft with two long rectangular solar panels in red and black. The spacecraft has no flags, no logos, no writing.
+There is absolutely no text inside the circle: no letters, no numbers, no words, no percent signs, no labels, no captions, no logos, no symbols that look like letters. The circle contains pictures only. Every word on the poster is outside the circle.
+
+THE FIVE HEADLINE BLOCKS — ALL OUTSIDE THE CIRCLE, ON THE WHITE PAPER:
+Each block is a headline in black bold condensed uppercase sans-serif (two lines unless stated), with a smaller sublabel underneath in red (#E3120B) bold condensed uppercase sans-serif. Each block is joined to its picture by a short thin black leader line that ends in a small solid red dot sitting on the circle's outline, right next to the matching picture. The leader lines stop at the circle outline and never enter the circle.
+
+Block 1 — in the left margin, level with the upper part of the circle, text aligned toward the circle, pointing to the handcuffs (dot at about 10 o'clock on the circle):
+  headline line 1: "MEXICO CAPTURES"
+  headline line 2: "CARTEL BOSS"
+  red sublabel line 1: "EL CHAPO ISIDRO ·"
+  red sublabel line 2: "FBI MOST WANTED"
+  (ISIDRO is spelled I-S-I-D-R-O.)
+
+Block 2 — in the right margin, level with the upper part of the circle, text aligned toward the circle, pointing to the missile (dot at about 2 o'clock):
+  headline line 1: "RUSSIAN STRIKE"
+  headline line 2: "HITS KRYVYI RIH"
+  red sublabel: "2 KILLED · 60 WOUNDED"
+  (KRYVYI RIH is spelled K-R-Y-V-Y-I R-I-H.)
+
+Block 3 — centred directly below the circle, pointing up to the globe (dot at 6 o'clock), on one line each:
+  headline: "COP31 TALKS RUN INTO OVERTIME"
+  red sublabel: "ANTALYA · NO FOSSIL-FUEL DEAL"
+  (ANTALYA is spelled A-N-T-A-L-Y-A.)
+
+Block 4 — in the left margin, level with the lower part of the circle, text aligned toward the circle, pointing to the spacecraft and Mercury (dot at about 8 o'clock):
+  headline line 1: "BEPICOLOMBO"
+  headline line 2: "REACHES MERCURY"
+  red sublabel line 1: "8-YEAR VOYAGE ·"
+  red sublabel line 2: "ESA & JAXA"
+  (BEPICOLOMBO is spelled B-E-P-I-C-O-L-O-M-B-O.)
+
+Block 5 — in the right margin, level with the lower part of the circle, text aligned toward the circle, pointing to the mosquito (dot at about 4 o'clock):
+  headline line 1: "MOSQUITOES CUT"
+  headline line 2: "DENGUE 69%"
+  red sublabel line 1: "BRAZIL TRIAL ·"
+  red sublabel line 2: "5,700 CHILDREN"
+  (MOSQUITOES is spelled M-O-S-Q-U-I-T-O-E-S. DENGUE is spelled D-E-N-G-U-E.)
+
+TYPOGRAPHY: all text uppercase, crisp, bold, condensed sans-serif, perfectly spelled, evenly spaced, sharp edges, high contrast, readable even when the poster is shown only 300 pixels wide. Size order from largest to smallest: "21 NOVEMBER 2026" (by far the largest), "THE WORLD ON", the five black headlines (all the same size), the red sublabels and the kicker, the footer. The "·" characters are small centred middle dots.
+
+COMPLETE LIST OF ALLOWED TEXT — the poster contains exactly these strings and nothing else, each exactly once, spelled exactly as written:
+"ONE DAY · ONE PICTURE"
+"THE WORLD ON"
+"21 NOVEMBER 2026"
+"MEXICO CAPTURES" "CARTEL BOSS" "EL CHAPO ISIDRO ·" "FBI MOST WANTED"
+"RUSSIAN STRIKE" "HITS KRYVYI RIH" "2 KILLED · 60 WOUNDED"
+"COP31 TALKS RUN INTO OVERTIME" "ANTALYA · NO FOSSIL-FUEL DEAL"
+"BEPICOLOMBO" "REACHES MERCURY" "8-YEAR VOYAGE ·" "ESA & JAXA"
+"MOSQUITOES CUT" "DENGUE 69%" "BRAZIL TRIAL ·" "5,700 CHILDREN"
+"SATURDAY · FIVE STORIES · ONE DAY"
+
+STRICT RULES, repeated: Absolutely no text, letters, numbers or words inside the circle — the circle holds the five pictures only. No text anywhere except the listed strings. No watermark, no signature, no artist name, no magazine logo, no extra captions, no page numbers, no barcode, no gibberish or pseudo-letters, no lettering on the badge, missile, spacecraft, globe, thermometer or buildings. Clean flat shapes, generous white space, one clear symmetrical composition, square format.
